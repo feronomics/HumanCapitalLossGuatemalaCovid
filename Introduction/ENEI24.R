@@ -1,0 +1,162 @@
+## IMPACTO DE LA PANDEMIA EN RESULTADOS LABORALES
+
+##Cargar paquetes
+library(foreign)
+library(readxl)
+library(dplyr)
+library(VIM)
+library(mice)
+library(ggplot2)
+library(sandwich)
+library(stargazer)
+library(webshot2)
+library(gridExtra)
+library(tidyr)
+
+### ENEI 2024
+
+##Cargar los datos:
+enei24 <- read.spss("ENEI_2024.sav", to.data.frame = TRUE)
+
+## Seleccionamos variables de interes:
+treat24 <- subset(enei24, select = c(
+  P00A10, P02A02, P02A03, P02A08, P03A03A, P03A03B, P05D01, 
+  P05D02C, P05D03B, P05C15A, P05C15B, P05C15C, P05C15D, 
+  P05C15E, P05C15F, P05C15G, PEA, OCUPADOS, FORMAL_INFORMAL))
+
+## Renombramos las variables:
+treat24_renamed <- treat24 %>%
+  mutate(across(c(P05C15A:P05C15G), ~ as.numeric(unlist(.x)))) %>%
+  rename(
+    area = P00A10,
+    SEXO = P02A02,
+    EDAD = P02A03,
+    ETNIA = P02A08,
+    NIVEL_EDUC = P03A03A,
+    GRADO = P03A03B,
+    SALARIO = P05D01,
+    HORAS_EXTRA = P05D02C,
+    COMISIONES = P05D03B, 
+    LUNES = P05C15A, 
+    MARTES = P05C15B, 
+    MIERCOLES = P05C15C,
+    JUEVES = P05C15D,
+    VIERNES = P05C15E,
+    SABADO = P05C15F,
+    DOMINGO = P05C15G)
+
+## Creamos la variable ingreso:
+treat24_renamed <- treat24_renamed %>%
+  mutate(INGRESO = rowSums(across(c(SALARIO, HORAS_EXTRA, COMISIONES)), na.rm=T),
+         HORAS = rowSums(across(c(LUNES, MARTES, MIERCOLES, JUEVES, VIERNES, SABADO, DOMINGO)), na.rm=T),
+         ESCOLARIDAD = case_when(
+           NIVEL_EDUC %in% c("NINGUNO", "PREPRIMARIA") ~ 0,
+           NIVEL_EDUC == "PRIMARIA" ~ GRADO,
+           NIVEL_EDUC %in% c("BÁSICO", "DIVERSIFICADO") ~ 6 + GRADO,
+           NIVEL_EDUC == "SUPERIOR" ~ 11 + GRADO,
+           NIVEL_EDUC == "MAESTRÍA" ~ 16 + GRADO,
+           NIVEL_EDUC == "DOCTORADO" ~ 19 + GRADO,
+           TRUE ~ NA)) %>%
+  select(-SALARIO, -HORAS_EXTRA, -COMISIONES, -LUNES, -MARTES, 
+         -MIERCOLES, -JUEVES, -VIERNES, -SABADO, -DOMINGO, -GRADO) 
+
+## Transformamos las variables de interes:
+treat24_transformed <- treat24_renamed %>% mutate(
+  area = ifelse(area == "Urbana", 1, 0),
+  SEXO = ifelse(SEXO == "Mujer", 1, 0),
+  ETNIA = ifelse(ETNIA == "Ladino" | ETNIA == "Extranjero", 0, 1),
+  PEA = ifelse(is.na(PEA), 0, PEA),
+  OCUPADOS = case_when(OCUPADOS == "Población ocupada" ~ 1, TRUE ~ 0), 
+  FORMAL_INFORMAL = case_when(FORMAL_INFORMAL == "Informal" ~ 1, TRUE ~ 0),
+  HORAS = ifelse(is.na(HORAS), 0, HORAS)) %>% rename(
+    urban = area,
+    woman = SEXO, 
+    age = EDAD,
+    indigenous = ETNIA,
+    educ_level = NIVEL_EDUC,
+    active = PEA,
+    ocuppied = OCUPADOS,
+    informal = FORMAL_INFORMAL, 
+    labor_income = INGRESO,
+    work_hours = HORAS, 
+    schooling = ESCOLARIDAD)
+
+treat24_trim <- treat24_transformed %>% filter(!is.na(labor_income)) %>% filter(labor_income > 0)
+
+
+### Graphing schooling v. income
+g1 <- ggplot(treat24_trim, aes(x = schooling, y = log(labor_income))) +
+  geom_point() + geom_smooth(method = "lm", se = F)  +  theme_minimal() +
+  labs(title = "Panel A", y = "Log of Labor Income", x = "Years of Schooling") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+### LOading municipality data
+mun_data <- read_excel("mun_data.xlsx", sheet = 1)
+
+### Graphing enrollment v. income
+g2<- ggplot(mun_data, aes(y = log(gdppc), x = enrollment)) + 
+  geom_point() + geom_smooth(method = "lm", se = F) + theme_minimal() + 
+  labs(title = "Panel B", y = "Log of municipal GDP per capita", x = "% of school enrollment (all levels)") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+### Save graphs
+g <- grid.arrange(g1, g2, nrow = 1, ncol = 2)
+
+ggsave("graph1.png", g, width = 10, height = 5)
+
+### Modelling
+treat24_trim <- treat24_trim %>% rename("Labor Income" = labor_income, 
+                                        "Years of Schooling" = schooling)
+
+mun_data <- mun_data %>% rename("municipal GDP per capita" = gdppc,
+                                "% of school enrollment (all levels)" = enrollment)
+
+m1 <- lm(log(`Labor Income`) ~ `Years of Schooling`, treat24_trim)
+se1 <- sqrt(diag(vcovHC(m1, type = "HC1")))
+
+m2 <- lm(log(`municipal GDP per capita`) ~ `% of school enrollment (all levels)`, mun_data)
+se2 <- sqrt(diag(vcovHC(m2, type = "HC1")))
+
+### Create table
+stargazer(m1, m2,
+          type = "html",
+          se = list(se1, se2),
+          intercept.bottom =  FALSE, 
+          out = "table1.html")
+
+### Save Table
+webshot("table1.html", "table1.png")
+
+##3 Load Data
+time_data <- read_excel("mun_data.xlsx", sheet = 2)
+time_data_long <- pivot_longer(time_data, cols = 2:4, names_to = "variable", values_to = "value")
+
+time_data_trans <- time_data_long %>%
+  arrange(year) %>%
+  group_by(variable) %>%
+  mutate(logvalue = log(value), value_d = logvalue - lag(logvalue)) %>%
+  filter(!year %in% c(2013, 2014))
+
+time_data_wide <- pivot_wider(time_data_trans[,c(1,2,5)], names_from = "variable", values_from = "value_d")
+time_data_wide <- time_data_wide[,1:3]
+
+g2 <- ggplot(time_data_wide, aes(x = year)) + 
+  geom_line(aes(y = gdp, color = "GDP")) + 
+  geom_line(aes(y = HighSchool, color = "High School enrollment")) + 
+  scale_color_manual(values = c("GDP" = "black", "High School enrollment" = "darkgrey")) +
+  labs(y = "% growth", color = "Variable") + theme_minimal()
+
+ggsave("graph2.png", g2, width = 10, height = 5)
+
+
+### Modelling
+m3 <- lm(gdp ~ HighSchool + lag(HighSchool), time_data_wide)
+se3 <- sqrt(diag(vcovHC(m3, type = "HC1")))
+
+stargazer(m3,
+          type = "html",
+          se = list(se3),
+          intercept.bottom =  FALSE, 
+          out = "table2.html")
+
+webshot("table2.html", "table2.png")
